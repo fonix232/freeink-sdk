@@ -2067,6 +2067,12 @@ inline bool isMetalioEInk4() { return ACTIVE.board == Board::MetalioEInk4; }
 inline bool isOnePage() { return ACTIVE.board == Board::OnePage; }
 inline bool isWsEpaper397() { return ACTIVE.board == Board::WsEpaper397; }
 inline bool hasTouch() { return ACTIVE.touch.controller != TouchController::None; }
+inline bool requiresTouchNavigation() {
+  const auto& input = ACTIVE.input;
+  return hasTouch() && input.back == PIN_UNASSIGNED && input.confirm == PIN_UNASSIGNED &&
+         input.left == PIN_UNASSIGNED && input.right == PIN_UNASSIGNED && input.up == PIN_UNASSIGNED &&
+         input.down == PIN_UNASSIGNED && input.adcLadderPin == PIN_UNASSIGNED;
+}
 inline bool hasHomeKey() { return ACTIVE.touch.hasHomeKey; }
 inline bool hasPwmFrontlight() { return ACTIVE.frontlight.gpio != PIN_UNASSIGNED || ACTIVE.frontlight.viaPm1Pwm; }
 inline bool hasI2cFrontlight() { return ACTIVE.i2cFrontlight.controller != I2cFrontlightController::None; }
