@@ -137,6 +137,7 @@ class FreeInkDisplay {
   void writeGrayscalePlaneStrip(GrayPlane plane, const uint8_t* rows, uint16_t yStart, uint16_t numRows);
   // Current mode availability, including output inversion and base readiness.
   // A query does not alter the pending refresh or the plane encoding.
+  void setReaderRendering(bool enabled);
   GrayscaleCapabilities grayscaleCapabilities(GrayscaleMode mode = GrayscaleMode::Overlay) const;
   // Compatibility wrappers for Overlay mode.
   bool supportsBusyGrayscaleStaging() const;
@@ -471,6 +472,7 @@ class FreeInkDisplay {
   bool _redRamSynced = false;
   bool _singleBufferFastDiff = false;
   bool _fastGrayscaleLut = false;
+  bool _readerRendering = false;
   bool _inverted = false;
   bool _inversionDirty = false;
 
