@@ -1,0 +1,7 @@
+Waveform data adapted from EPD_Painter by Tony Weston.
+https://github.com/tonywestonuk/EPD_Painter
+Revision 6335a149c5a9b3be4150880e0be64ef2529ba62a, src/M5PaperS3_Trains.h.
+Apache License 2.0 (included in LICENSE).
+Modifications: extracted NORMAL four-level apply/remove and direct trains;
+new standalone native PaperS3 transition planner, native tone ordering,
+float normalization, and isolated tests. No upstream runtime is linked.
