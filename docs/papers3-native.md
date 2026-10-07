@@ -75,10 +75,25 @@ for comparison. Four tones use levels 0, 5, 10 and 15 of those tables.
   for 29 scans in total.
 - Each scan is followed by a 250 us pause.
 
+### EPDiy (experimental)
+
+`experimental/epdiy/` adapts EPDiy's ED047TC1 waveform tables (LGPL-3.0-only;
+see its LICENSE and README.md). In EPDiy the gate (CKV) pulse length is part of
+the waveform, so while it is selected each row gets a cycle-counted CKV pulse
+of the current phase's length (at most 100 us, under a short critical
+section), and the final latched row receives one too.
+
+- Black/white destinations use DU. Gray destinations use five DU endpoint
+  phases followed by GL16 (GC16 for forced pages), masked to intermediate
+  grays — a local PaperS3 composition, not an upstream waveform.
+- Forced pages first run five 100 us white scans and one neutral scan.
+- The tables cover 20–30 °C only, and the pulse timing includes instruction
+  overhead not yet checked on a logic analyzer. Validate on the panel.
+
 ### Selecting a waveform
 
 `FREEINK_PAPERS3_WAVEFORM` sets the boot waveform: `0` native (default), `1`
-LovyanGFX. `PaperS3Driver::setWaveform()` switches at runtime; call it between
+LovyanGFX, `3` EPDiy. `PaperS3Driver::setWaveform()` switches at runtime; call it between
 presentations under the render lock. The previous optical state does not carry
 over, so the next refresh is a forced one. Unknown values select native.
 
@@ -102,7 +117,8 @@ waveform, so leave it off otherwise.
 `libs/display/FreeInkDisplay/test/host/run_papers3.py` runs the driver against a
 delayed, recording DMA mock with ASan/UBSan: all 65,536 packed old/new
 combinations, DMA buffer ownership, staging, unchanged-frame skipping, the
-native forced-clear sequence, waveform switching without reallocation, and
+native forced-clear sequence, EPDiy's clear and scan counts and endpoint
+erasure, waveform switching without reallocation, and
 allocation, bus, timeout and submission failures. It also exhausts the native
 waveform's transitions, charge balance and packed rows. It does not model
 pigment response or measure contrast.
@@ -119,6 +135,7 @@ show only what was submitted.
 ## Sources
 
 - https://github.com/m5stack/M5GFX/tree/0.2.29/src/lgfx/v1/platforms/esp32
+- https://github.com/vroland/epdiy/blob/42c16127dc5d4bca15e830624f22666ad914575f/src/waveforms/epdiy_ED047TC1.h
 - https://github.com/tonywestonuk/EPD_Painter/blob/6335a149c5a9b3be4150880e0be64ef2529ba62a/src/EPD_Painter.cpp
 - https://github.com/tonywestonuk/EPD_Painter/blob/6335a149c5a9b3be4150880e0be64ef2529ba62a/src/M5PaperS3_Trains.h
 - https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/peripherals/lcd/i80_lcd.html

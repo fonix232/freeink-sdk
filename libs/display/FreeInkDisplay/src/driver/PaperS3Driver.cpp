@@ -3,6 +3,7 @@
 #if FREEINK_DRIVER_PAPERS3
 #include <BoardPaperS3Pins.h>
 #include <driver/gpio.h>
+#include <esp_cpu.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_private/gdma.h>
@@ -23,12 +24,15 @@
 #include "PaperS3Driver.h"
 #include "PaperS3LovyanWaveforms.h"
 #include "PaperS3NativeWaveform.h"
+#include "experimental/epdiy/PaperS3EpdiyWaveforms.h"
 
-// Boot-time waveform: 0 native, 1 LovyanGFX reference. setWaveform() overrides it.
+// Boot-time waveform: 0 native, 1 LovyanGFX reference, 3 EPDiy (experimental).
+// setWaveform() overrides it.
 #ifndef FREEINK_PAPERS3_WAVEFORM
 #define FREEINK_PAPERS3_WAVEFORM 0
 #endif
-static_assert(FREEINK_PAPERS3_WAVEFORM == 0 || FREEINK_PAPERS3_WAVEFORM == 1, "Invalid PaperS3 waveform");
+static_assert(FREEINK_PAPERS3_WAVEFORM == 0 || FREEINK_PAPERS3_WAVEFORM == 1 || FREEINK_PAPERS3_WAVEFORM == 3,
+              "Invalid PaperS3 waveform");
 
 // Enable only while diagnosing scan stages; per-row timers perturb the waveform.
 #ifndef FREEINK_PAPERS3_PROFILE_SCANS
@@ -64,6 +68,9 @@ struct State {
   bool ready = false, powered = false, baseline = false, pending = false, turnOff = false;
   RefreshMode mode = RefreshMode::Full;
   PaperS3ScanTiming timing;
+  // EPDiy: current plan and the gate pulse used for each row of this scan.
+  papers3::epdiy::Mode epdiyMode = papers3::epdiy::Mode::DirectMono;
+  papers3::epdiy::Phase pulse = papers3::epdiy::NEUTRAL;
 } state;
 
 void pin(int pin, bool high) { gpio_set_level(static_cast<gpio_num_t>(pin), high); }
@@ -101,6 +108,27 @@ void release() {
   heap_caps_free(state.row);
   heap_caps_free(state.memory);
   state = {};
+}
+
+bool epdiy() { return selectedWaveform == PaperS3Waveform::Epdiy; }
+
+// EPDiy pulse used while clearing unknown glass: 100 us high, 5 us low.
+constexpr papers3::epdiy::Phase EPDIY_CLEAR_PULSE = {0, 1000, 50};
+
+portMUX_TYPE gateMux = portMUX_INITIALIZER_UNLOCKED;
+// EPDiy's gate (CKV) pulse length is part of its waveform. Bound the active
+// pulse against preemption; the longest is 100 us. CPU frequency is held by the
+// caller's display power lock for the whole refresh.
+void pulseGate() {
+  const uint32_t cycles = (state.timing.cpuMhz * state.pulse.gateHighTenthsUs + 9) / 10;
+  portENTER_CRITICAL(&gateMux);
+  gpio_ll_set_level(&GPIO, PAPERS3_EP_CKV, 1);
+  const uint32_t start = esp_cpu_get_cycle_count();
+  while (static_cast<uint32_t>(esp_cpu_get_cycle_count() - start) < cycles) {
+  }
+  gpio_ll_set_level(&GPIO, PAPERS3_EP_CKV, 0);
+  portEXIT_CRITICAL(&gateMux);
+  delayMicroseconds((state.pulse.gateLowTenthsUs + 9) / 10);
 }
 
 void startFrame() {
@@ -147,7 +175,11 @@ bool submitLine(size_t index) {
   // initially; unlike the general i80 API this needs no transaction queue.
   delayMicroseconds(4);
   pin(PAPERS3_EP_LE, false);
-  pin(PAPERS3_EP_CKV, true);
+  if (epdiy()) {
+    pulseGate();
+  } else {
+    pin(PAPERS3_EP_CKV, true);
+  }
   pin(PAPERS3_EP_SPH, false);
   lcd_ll_start(&LCD_CAM);
   return true;
@@ -164,8 +196,14 @@ void convertTransitions(uint8_t* __restrict output, const uint16_t* __restrict i
 }
 
 uint8_t transitionDrive(uint8_t before, uint8_t after, size_t step) {
-  return selectedWaveform == PaperS3Waveform::Native ? papers3::native::drive(before, after, step)
-                                                     : papers3::lovyan::differentialDrive(before, after, step);
+  switch (selectedWaveform) {
+    case PaperS3Waveform::LovyanGfx:
+      return papers3::lovyan::differentialDrive(before, after, step);
+    case PaperS3Waveform::Epdiy:
+      return papers3::epdiy::drive(before, after, papers3::epdiy::presentationPhase(state.epdiyMode, step));
+    default:
+      return papers3::native::drive(before, after, step);
+  }
 }
 
 // One full panel scan. fillRow writes the drive codes for a row into its DMA
@@ -201,6 +239,12 @@ bool scan(FillRow fillRow) {
     ++state.timing.rows;
   }
   if (!waitLine()) return false;
+  if (epdiy()) {
+    // Drive the final latched row before releasing the gate clock.
+    pin(PAPERS3_EP_LE, false);
+    pulseGate();
+    return true;
+  }
   delayMicroseconds(selectedWaveform == PaperS3Waveform::Native ? papers3::native::POST_SCAN_GAP_US
                                                                 : LOVYAN_SCAN_GAP_US);
   pin(PAPERS3_EP_LE, false);
@@ -221,6 +265,7 @@ bool transitionScan(size_t step) {
     state.transitionLut[value] =
         (transitionDrive(value >> 6, (value >> 2) & 3, step) << 2) | transitionDrive((value >> 4) & 3, value & 3, step);
   }
+  if (epdiy()) state.pulse = papers3::epdiy::presentationPhase(state.epdiyMode, step);
   return scan(
       [](uint8_t* row, size_t offset) { convertTransitions(row, state.transitions + offset, state.transitionLut); });
 }
@@ -271,6 +316,21 @@ bool commitNative(bool force) {
   return ok;
 }
 
+// DU for black/white destinations; DU endpoints then GL16 (or GC16 when
+// forced) for gray ones. A forced page first whitens unknown glass.
+bool commitEpdiy(bool grayscale, bool force) {
+  using namespace papers3::epdiy;
+  state.epdiyMode = !grayscale ? Mode::DirectMono : force ? Mode::Grayscale : Mode::Text;
+  bool ok = true;
+  if (force) {
+    state.pulse = EPDIY_CLEAR_PULSE;
+    for (unsigned i = 0; i < 5 && ok; ++i) ok = uniformScan(0xaa);
+    if (ok) ok = uniformScan(0);
+  }
+  for (size_t step = 0; step < presentationPhaseCount(state.epdiyMode) && ok; ++step) ok = transitionScan(step);
+  return ok;
+}
+
 bool commitLovyan(bool grayscale, bool force) {
   using namespace papers3::lovyan;
   if (grayscale && !force) {
@@ -296,14 +356,21 @@ void commit(bool grayscale, bool turnOff) {
   state.timing = {};
   state.timing.cpuMhz = getCpuFrequencyMhz();
   const bool native = selectedWaveform == PaperS3Waveform::Native;
-  if (native || (grayscale && !force)) {
-    prepareTransitions(native && force);
+  if (selectedWaveform != PaperS3Waveform::LovyanGfx || (grayscale && !force)) {
+    prepareTransitions((native || epdiy()) && force);
 #if FREEINK_PAPERS3_PROFILE_SCANS
     state.timing.convertUs = esp_timer_get_time() - started;
 #endif
   }
   power(true);
-  const bool ok = native ? commitNative(force) : commitLovyan(grayscale, force);
+  bool ok;
+  if (native) {
+    ok = commitNative(force);
+  } else if (epdiy()) {
+    ok = commitEpdiy(grayscale, force);
+  } else {
+    ok = commitLovyan(grayscale, force);
+  }
   if (ok) {
     memcpy(state.previous, state.target, FRAME_BYTES);
     state.baseline = true;
@@ -329,7 +396,9 @@ void loadBw(const uint8_t* fb) {
 }  // namespace
 
 void PaperS3Driver::setWaveform(PaperS3Waveform waveform) {
-  if (waveform != PaperS3Waveform::LovyanGfx) waveform = PaperS3Waveform::Native;
+  if (waveform != PaperS3Waveform::LovyanGfx && waveform != PaperS3Waveform::Epdiy) {
+    waveform = PaperS3Waveform::Native;
+  }
   if (selectedWaveform == waveform) return;
   // Caller serializes with presentation; all row transfers are synchronous.
   // The other waveform cannot start from this one's optical state.

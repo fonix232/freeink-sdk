@@ -16,6 +16,7 @@ with tempfile.TemporaryDirectory(prefix='papers3-driver-') as directory:
         path.write_text(text)
     for name in ('PaperS3Driver.cpp', 'PaperS3Driver.h', 'PaperS3LovyanWaveforms.h', 'PaperS3NativeWaveform.h', 'PanelDriver.h'):
         write('driver/' + name, (SOURCE / 'driver' / name).read_text().replace('../../include/GrayscaleCapabilities.h', '../GrayscaleCapabilities.h'))
+    shutil.copytree(SOURCE / 'driver/experimental/epdiy', root / 'driver/experimental/epdiy')
     shutil.copy2(SOURCE.parent / 'include/GrayscaleCapabilities.h', root)
     pins = SOURCE.parents[2] / 'hardware/BoardPaperS3/include/BoardPaperS3Pins.h'
     shutil.copy2(pins, root)
@@ -154,7 +155,7 @@ inline int gdma_start(void*,intptr_t address) {
 }
 
 ''')
-    for name in ('Arduino.h','esp_heap_caps.h','esp_lcd_panel_io.h','esp_log.h','esp_timer.h','esp_rom_gpio.h','soc/gpio_sig_map.h','driver/gpio.h','freertos/FreeRTOS.h','freertos/semphr.h','freertos/task.h','hal/gpio_ll.h','soc/gpio_struct.h','esp_private/gdma.h','esp_private/periph_ctrl.h','hal/dma_types.h','hal/lcd_ll.h','soc/lcd_cam_struct.h'):
+    for name in ('Arduino.h','esp_cpu.h','esp_heap_caps.h','esp_lcd_panel_io.h','esp_log.h','esp_timer.h','esp_rom_gpio.h','soc/gpio_sig_map.h','driver/gpio.h','freertos/FreeRTOS.h','freertos/semphr.h','freertos/task.h','hal/gpio_ll.h','soc/gpio_struct.h','esp_private/gdma.h','esp_private/periph_ctrl.h','hal/dma_types.h','hal/lcd_ll.h','soc/lcd_cam_struct.h'):
         write(name, '#include <mock.h>\n')
     write('test.cpp', r'''
 #include "driver/PaperS3Driver.cpp"
@@ -232,11 +233,25 @@ int main() {
     assert(((firstRows[step][old]>>(6-2*next))&3)==expected);
   }
   assert(!pins[PAPERS3_EP_PWR]);
+  // EPDiy keeps strong endpoint erasure for antialiased pages as well as menus.
+  for(auto mode : {papers3::epdiy::Mode::Grayscale,papers3::epdiy::Mode::Text}) {
+    for(unsigned old=0;old<4;++old)for(unsigned next=0;next<4;++next) {
+      unsigned whiteUs10=0;
+      for(size_t step=0;step<papers3::epdiy::presentationPhaseCount(mode);++step) {
+        const auto p=papers3::epdiy::presentationPhase(mode,step);
+        const auto code=papers3::epdiy::drive(old,next,p);
+        if(next==3 && code==2)whiteUs10+=p.gateHighTenthsUs;
+        if(step<5 && (next==1 || next==2))assert(code==0);
+        if(step>=5 && (next==0 || next==3))assert(code==0);
+      }
+      if(next==3 && old!=3)assert(whiteUs10==5000);
+    }
+  }
   // Switch waveforms at runtime: buffers are kept, the first page after a
   // switch is a full clear, then the waveform's differential plan is used.
   const auto* memory=state.memory;
   const auto allocated=allocations;
-  for(auto waveform : {PaperS3Waveform::Native,PaperS3Waveform::LovyanGfx,PaperS3Waveform::Native}) {
+  for(auto waveform : {PaperS3Waveform::Native,PaperS3Waveform::Epdiy,PaperS3Waveform::LovyanGfx,PaperS3Waveform::Native}) {
     driver.setWaveform(waveform);
     assert(!state.baseline && !state.pending);
     assert(state.memory==memory && allocations==allocated);
@@ -256,6 +271,12 @@ int main() {
         for(auto byte:firstRows[i])assert(byte==code);
       }
     }
+    if(waveform==PaperS3Waveform::Epdiy) {
+      assert(submissions-before==12*540); // five white-clear + neutral + six DU scans
+      assert(state.epdiyMode==papers3::epdiy::Mode::DirectMono);
+      for(unsigned phase=0;phase<5;++phase)for(auto byte:firstRows[phase])assert(byte==0xaa);
+      for(auto byte:firstRows[5])assert(byte==0); // white initialization ends neutral
+    }
     driver.setWaveform(waveform);
     assert(state.baseline); // unchanged setting never forces repeated clears
     const auto after=submissions;
@@ -263,9 +284,10 @@ int main() {
     assert(submissions==after);
     bw[0]^=0xff;
     driver.display(bus,bw.data(),nullptr,RefreshMode::Fast,true);
-    const size_t steps=waveform==PaperS3Waveform::Native?native::STEPS:10;
+    const size_t steps=waveform==PaperS3Waveform::Native?native::STEPS:waveform==PaperS3Waveform::Epdiy?6:10;
     assert(submissions-after==steps*540);
   }
+  assert(cycleCount>0); // EPDiy emitted cycle-counted gate pulses
   driver.setWaveform(static_cast<PaperS3Waveform>(255));
   assert(selectedWaveform==PaperS3Waveform::Native);
   bw[0]=0; // ensure the timeout test has changed pixels

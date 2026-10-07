@@ -5,7 +5,8 @@
 namespace freeink {
 // Native: the default per-transition waveform (PaperS3NativeWaveform.h).
 // LovyanGfx: the LovyanGFX drive tables, kept as a comparison reference.
-enum class PaperS3Waveform : uint8_t { Native = 0, LovyanGfx = 1 };
+// Epdiy: experimental EPDiy ED047TC1 tables with per-phase gate pulse timing.
+enum class PaperS3Waveform : uint8_t { Native = 0, LovyanGfx = 1, Epdiy = 3 };
 
 struct PaperS3ScanTiming {
   uint32_t totalUs = 0, convertUs = 0, waitUs = 0, submitUs = 0, rows = 0, cpuMhz = 0;
