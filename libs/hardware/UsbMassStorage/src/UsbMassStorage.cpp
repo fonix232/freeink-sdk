@@ -18,7 +18,21 @@ extern "C" bool tud_suspended(void);
 namespace freeink {
 namespace {
 
-USBMSC gMsc;
+// USBMSC::end() clears the identity strings, so they are set again on every
+// begin() as well as here.
+void setIdentity(USBMSC& msc) {
+  msc.vendorID("FreeInk");
+  msc.productID("SD Card");
+  msc.productRevision("1.0");
+}
+
+// Register a stable identity before Arduino starts composite CDC/MSC USB.
+// Media stays absent until the filesystem has been handed to USB Drive.
+class SdUsbMsc : public USBMSC {
+ public:
+  SdUsbMsc() { setIdentity(*this); }
+};
+SdUsbMsc gMsc;
 std::atomic<UsbMassStorage*> gOwner{nullptr};
 std::atomic<FsBlockDeviceInterface*> gDev{nullptr};
 constexpr uint16_t kBlockSize = 512;
@@ -130,10 +144,8 @@ bool UsbMassStorage::begin(FsBlockDeviceInterface* dev) {
   gOwner.store(this);
   _state.store(UsbMassStorageState::WaitingForHost);
   _hostSeen.store(false);
-  gMsc.vendorID("FreeInk");
-  gMsc.productID("SD Card");
-  gMsc.productRevision("1.0");
-  gMsc.mediaPresent(true);
+  setIdentity(gMsc);
+  gMsc.mediaPresent(false);
   gMsc.isWritable(true);
   gMsc.onStartStop(mscStartStop);
   gMsc.onRead(mscRead);
@@ -145,6 +157,9 @@ bool UsbMassStorage::begin(FsBlockDeviceInterface* dev) {
     _state.store(UsbMassStorageState::Idle);
     return false;
   }
+  // Publish media only after geometry and callbacks are ready: CDC may have
+  // already started the shared USB stack at boot.
+  gMsc.mediaPresent(true);
   if (!USB.begin()) {
     gMsc.end();
     gOwner.store(nullptr);
