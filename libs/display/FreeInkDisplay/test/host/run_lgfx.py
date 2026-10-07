@@ -108,7 +108,7 @@ public:
         (root / "lgfx/v1/platforms/esp32" / name).write_text('#include <M5GFX.h>\n')
     exe = root / "test_lgfx"
     subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra",
-                    "-Wno-unused-parameter", "-DFREEINK_DRIVER_LGFX_EPD=1", "-DFREEINK_DEVICE_PAPERS3=1",
+                    "-Wno-unused-parameter", "-DFREEINK_DRIVER_LGFX_EPD=1", "-DFREEINK_LGFX_EPD_CONFIG=testLgfxConfig",
                     "-I"+str(root), str(HERE / "test_lgfx.cpp"),
                     str(root / "driver/LgfxEpdDriver.cpp"), "-o", str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

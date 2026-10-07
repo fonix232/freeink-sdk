@@ -7,7 +7,7 @@
 #include "driver/LgfxEpdDriver.h"
 
 namespace freeink {
-const LgfxEpdConfig& m5PaperS3LgfxConfig() {
+const LgfxEpdConfig& testLgfxConfig() {
   static const LgfxEpdConfig cfg{};
   return cfg;
 }
@@ -16,7 +16,7 @@ const LgfxEpdConfig& m5PaperS3LgfxConfig() {
 int main() {
   using namespace freeink;
   EpdBus bus;
-  LgfxEpdDriver driver(m5PaperS3LgfxConfig());
+  LgfxEpdDriver driver(testLgfxConfig());
   driver.begin(bus);
   assert(!lgfx::initCleared);  // Retained boot image remains untouched.
   assert(driver.grayscaleCapabilities().base == GrayscaleBase::Combined);

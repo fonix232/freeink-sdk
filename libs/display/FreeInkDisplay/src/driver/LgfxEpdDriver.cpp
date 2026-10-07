@@ -429,18 +429,11 @@ void LgfxEpdDriver::deepSleep(EpdBus& bus) {
 // and power hooks are entirely board-specific — so a LilyGo-class board defines
 // `const LgfxEpdConfig& yourConfig();` in namespace freeink and builds with
 // -DFREEINK_LGFX_EPD_CONFIG=yourConfig. The SDK's board-support libraries provide
-// the default configs for FREEINK_DEVICE_LILYGO (BoardT5S3) and
-// FREEINK_DEVICE_PAPERS3 (BoardPaperS3) builds.
+// the default config for FREEINK_DEVICE_LILYGO (BoardT5S3).
 #if FREEINK_DEVICE_LILYGO
 const LgfxEpdConfig& lilygoT5S3LgfxConfig();
 PanelDriver& lgfxEpdDriver() {
   static LgfxEpdDriver instance(lilygoT5S3LgfxConfig());
-  return instance;
-}
-#elif FREEINK_DEVICE_PAPERS3 && !defined(FREEINK_LGFX_EPD_CONFIG)
-const LgfxEpdConfig& m5PaperS3LgfxConfig();
-PanelDriver& lgfxEpdDriver() {
-  static LgfxEpdDriver instance(m5PaperS3LgfxConfig());
   return instance;
 }
 #elif defined(FREEINK_LGFX_EPD_CONFIG)
