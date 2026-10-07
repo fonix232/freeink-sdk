@@ -13,4 +13,12 @@ namespace BoardPaperS3 {
 // board browns back up, so treat it as best-effort there.
 void powerOff();
 
+// Retains RAM/display; timer-only nap preserves the existing touch polling cadence.
+// Caller must quiesce storage/rendering and stop radios. Returns actual sleep us,
+// or zero on rejection. USB is checked here as well as by the caller.
+uint32_t idleSleep(uint32_t milliseconds);
+
+// GPIO5 is an analog divider, not a digital logic-level USB detect input.
+uint16_t usbMillivolts();
+
 }  // namespace BoardPaperS3
