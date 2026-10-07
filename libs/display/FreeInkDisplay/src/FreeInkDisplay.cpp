@@ -570,6 +570,14 @@ bool FreeInkDisplay::supportsAsyncRefresh() const {
   return !_inverted && !_inversionDirty && _driver != nullptr && _driver->supportsAsyncDisplay();
 }
 
+void FreeInkDisplay::setReaderRendering(bool enabled) {
+  if (_readerRendering == enabled) return;
+  syncPendingAsync();
+  cancelGrayscalePass();
+  _readerRendering = enabled;
+  if (_driver) _driver->setReaderRendering(enabled);
+}
+
 GrayscaleCapabilities FreeInkDisplay::grayscaleCapabilities(GrayscaleMode mode) const {
   if (_inverted || !_driver) return {};
   auto caps = _driver->grayscaleCapabilities(mode);
@@ -818,9 +826,17 @@ void FreeInkDisplay::displayGrayBuffer(bool turnOffScreen, const unsigned char* 
       cancelGrayscalePass();
       return;
     }
-    _driver->displayGray(_bus, frameBuffer, turnOffScreen, nullptr, true);
+    const bool preserved = _driver->preservesAbsoluteGrayscaleBaseline();
+    _driver->displayGray(_bus, frameBuffer, turnOffScreen, nullptr, factoryMode || !preserved);
     _inversionDirty = false;
-    cancelGrayscalePass();
+    if (preserved) {
+      // A successful combined pass is complete, not canceled. Keep its baseline.
+      _grayscaleMode = GrayscaleMode::Overlay;
+      _grayRows[0] = _grayRows[1] = 0;
+      _grayPassFailed = false;
+    } else {
+      cancelGrayscalePass();
+    }
     return;
   }
   _driver->displayGray(_bus, frameBuffer, turnOffScreen, lut, factoryMode);

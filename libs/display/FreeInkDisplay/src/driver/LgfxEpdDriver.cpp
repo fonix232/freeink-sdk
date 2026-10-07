@@ -52,6 +52,10 @@ class FreeInkBusEPD : public lgfx::Bus_EPD {
 
 class FreeInkLgfxEpd : public lgfx::LGFX_Device {
  public:
+  // Keep the normal hardware initialization, but allow retained e-paper content
+  // to survive until the application supplies its first frame.
+  bool initPanel(bool clear) { return init_impl(true, clear); }
+
   void setup(const LgfxEpdConfig& c, uint16_t w, uint16_t h) {
     auto bc = _bus.config();
     bc.bus_speed = c.busHz;
@@ -219,6 +223,8 @@ void overlayCanvasGray() {
 // used to hardcode epd_fast while display() maps HALF/FULL to epd_text, so any
 // page refreshed with those modes flashed when its AA pass ran.
 lgfx::epd_mode::epd_mode_t g_lastBaseEpdMode = lgfx::epd_mode::epd_fast;
+bool g_grayBasePending = false;
+bool g_grayBaseTurnOff = false;
 
 bool lastPushUsedCleanBank() { return g_lastBaseEpdMode == lgfx::epd_mode::epd_text; }
 
@@ -289,12 +295,13 @@ void LgfxEpdDriver::begin(EpdBus& bus) {
 #if FREEINK_DRIVER_LGFX_EPD
   g_hooks = &_cfg.power;
   g_dev.setup(_cfg, BoardConfig::ACTIVE.displayWidth, BoardConfig::ACTIVE.displayHeight);
-  g_dev.init();
+  g_dev.initPanel(!BoardConfig::isM5PaperS3());
   g_dev.setRotation(_cfg.rotation);
   g_dev.setEpdMode(lgfx::epd_mode::epd_fast);
   g_cleanBankNeedsFreshBackground = _cfg.cleanBankNeedsFreshBackground;
   g_noDriveBankAvailable = _cfg.lutFastest != nullptr && _cfg.lutFastestStep == 1 && _cfg.lutFastest[0] == 0u;
   allocCanvas(BoardConfig::ACTIVE.displayWidth, BoardConfig::ACTIVE.displayHeight);
+  g_grayBasePending = false;
 #endif
 }
 
@@ -302,6 +309,7 @@ void LgfxEpdDriver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev,
   (void)bus;
   (void)prev;
 #if FREEINK_DRIVER_LGFX_EPD
+  g_grayBasePending = false;
   fillCanvasBW(fb);  // expand the 1-bpp frame into the gray canvas
   const auto epdMode = epdModeFor(mode);
   if (epdMode == lgfx::epd_mode::epd_text) normalizeForCleanBank();
@@ -313,6 +321,27 @@ void LgfxEpdDriver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev,
   (void)mode;
   (void)turnOff;
 #endif
+}
+
+GrayscaleCapabilities LgfxEpdDriver::grayscaleCapabilities(GrayscaleMode mode) const {
+  if (mode != GrayscaleMode::Overlay) return {};
+  return {GrayscaleEncoding::OverlayMasks,
+          BoardConfig::isM5PaperS3() ? GrayscaleBase::Combined : GrayscaleBase::Separate, true, false, false};
+}
+
+void LgfxEpdDriver::displayGrayscaleBase(EpdBus& bus, const uint8_t* fb, RefreshMode fallback, bool turnOff) {
+#if FREEINK_DRIVER_LGFX_EPD
+  if (BoardConfig::isM5PaperS3()) {
+    // Stage the B/W base in the existing PSRAM canvas. The gray planes will
+    // join it before a single epd_text push; epd_fast dithers grays to B/W.
+    fillCanvasBW(fb);
+    g_lastBaseEpdMode = lgfx::epd_mode::epd_text;
+    g_grayBasePending = true;
+    g_grayBaseTurnOff = turnOff;
+    return;
+  }
+#endif
+  display(bus, fb, nullptr, fallback, turnOff);
 }
 
 void LgfxEpdDriver::copyGrayscaleLsb(EpdBus& bus, const uint8_t* lsb) {
@@ -357,13 +386,12 @@ void LgfxEpdDriver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, co
 #if FREEINK_DRIVER_LGFX_EPD
   (void)fb;             // the canvas from the base push IS the base; see overlayCanvasGray()
   overlayCanvasGray();  // darken only the pixels the planes select
-  // Same mode as the B/W base push, and now actually the same: Panel_EPD's
-  // per-pixel diff keys on the epd_mode LUT offset, so switching modes here
-  // re-drives every pixel (full-screen flash). This was hardcoded to epd_fast
-  // while display() maps HALF/FULL to epd_text, so a page refreshed with either
-  // of those flashed when its AA pass ran.
-  pushCanvas(g_lastBaseEpdMode);
-  if (turnOff) g_dev.sleep();
+  // PaperS3 must use a grayscale-capable mode, including callers that supplied
+  // their B/W base through display(). Combined reader pages avoid that extra
+  // base activation and the fast->text mode switch entirely.
+  pushCanvas(BoardConfig::isM5PaperS3() ? lgfx::epd_mode::epd_text : g_lastBaseEpdMode);
+  if (turnOff || (g_grayBasePending && g_grayBaseTurnOff)) g_dev.sleep();
+  g_grayBasePending = false;
 #else
   (void)fb;
   (void)turnOff;
@@ -373,8 +401,18 @@ void LgfxEpdDriver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, co
 void LgfxEpdDriver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
   (void)bus;
 #if FREEINK_DRIVER_LGFX_EPD
-  if (!bw) return;
+  if (!bw) {
+    g_grayBasePending = false;
+    return;
+  }
   fillCanvasBW(bw);
+  // If AA was abandoned (e.g. strip allocation failure), still paint the
+  // pending base. Successful gray passes only restore the RAM canvas here.
+  if (g_grayBasePending) {
+    pushCanvas(g_lastBaseEpdMode);
+    if (g_grayBaseTurnOff) g_dev.sleep();
+    g_grayBasePending = false;
+  }
 #else
   (void)bw;
 #endif

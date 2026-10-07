@@ -23,6 +23,10 @@
 
 #include "PanelDriver.h"
 
+#ifndef FREEINK_UC8279X4_COMBINED_TEXT
+#define FREEINK_UC8279X4_COMBINED_TEXT 0
+#endif
+
 namespace freeink {
 
 struct Uc8279X4Config {
@@ -69,13 +73,22 @@ class Uc8279X4Driver : public PanelDriver {
   BusyPolarity busyPolarity() const override { return BusyPolarity::UcIdleHigh; }
   PanelGeometry geometry() const override;
 
+  void setReaderRendering(bool enabled) override {
+    if (_readerRendering == enabled) return;
+    _readerRendering = enabled;
+    requestResync(1);  // Clear residual gray charge when changing rendering paths.
+  }
   void begin(EpdBus& bus) override;
   void deepSleep(EpdBus& bus) override;
 
   void display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
   bool displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
   void displayFinish(EpdBus& bus, const uint8_t* fb) override;
-  bool supportsAsyncDisplay() const override { return true; }
+  bool supportsAsyncDisplay() const override { return !(FREEINK_UC8279X4_COMBINED_TEXT && _readerRendering); }
+
+  bool preservesAbsoluteGrayscaleBaseline() const override {
+    return FREEINK_UC8279X4_COMBINED_TEXT && _readerRendering && _grayBase;
+  }
 
   void requestResync(uint8_t settlePasses) override;
   void skipInitialResync() override;
@@ -102,15 +115,13 @@ class Uc8279X4Driver : public PanelDriver {
   void copyGrayscaleMsb(EpdBus& bus, const uint8_t* msb) override;
   void displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, const unsigned char* lut, bool factoryMode) override;
   void cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) override;
-  // Base frame for a grayscale overlay. The periodic clean the reader asks for
-  // via a Half fallback must be a TRUE Full GC on this path — the Half is a B/W
-  // invert-seed scrub that cannot clear the panel's gray edge charge and leaves
-  // ghosting on an AA page. Promote Half->Full here; Fast stays Fast (the
-  // absolute AA path self-cleans per page). The pure-B/W menu keeps its Half
-  // scrub because it arrives through display()/displayStart, not this entry.
+  // Combined refreshes retain the stronger bank for initial/scheduled cleanup.
+  // Reader grayscale and B/W pages share the selected waveform. An explicit
+  // full B/W refresh still uses the controller's OTP cleanup.
   void displayGrayscaleBase(EpdBus& bus, const uint8_t* fb, RefreshMode fallback, bool turnOff) override;
 
  private:
+  bool _readerRendering = false;
   void initController(EpdBus& bus);
   void startBwRefresh(EpdBus& bus, bool fast);
   // Stream a framebuffer into a RAM plane: 0xFF padding for gates before the
@@ -147,6 +158,10 @@ class Uc8279X4Driver : public PanelDriver {
   // absolute plane0, copyGrayscaleMsb derives plane1 and recovers the base for
   // the post-DRF restore. SPIRAM-backed, framebuffer-sized, allocated in begin().
   uint8_t* _grayBase = nullptr;
+  bool _combinedTextPending = false;
+  bool _combinedTextClean = false;
+  bool _combinedTextTurnOff = false;
+  uint8_t _combinedTextPlanes = 0;
   bool _grayImagePass = false;
   bool _grayBaseValid = false;
   bool _absoluteGrayPlanes = false;

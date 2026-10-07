@@ -62,6 +62,9 @@ class PanelDriver {
   // front. Must agree with what displayStart() actually returns.
   virtual bool supportsAsyncDisplay() const { return false; }
 
+  // Completed absolute grayscale passes restore a baseline usable by the next paint.
+  virtual bool preservesAbsoluteGrayscaleBaseline() const { return false; }
+
   // Two-call refresh split (CrossPoint EInkDisplay::triggerDisplay/completeDisplay).
   // For the shadowed async path the facade passes its own baseline copy as
   // `prev`, so the live fb may be redrawn immediately; otherwise `fb` must
@@ -107,6 +110,8 @@ class PanelDriver {
   }
 
   // --- grayscale (dual-plane LSB/MSB) ---
+  virtual void setReaderRendering(bool enabled) { (void)enabled; }
+
   virtual GrayscaleCapabilities grayscaleCapabilities(GrayscaleMode mode = GrayscaleMode::Overlay) const {
     (void)mode;
     return {};
