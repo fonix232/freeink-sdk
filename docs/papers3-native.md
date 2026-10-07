@@ -16,9 +16,10 @@ waveform generator, not an SPI framebuffer upload.
 ## Transport
 
 - The driver owns LCD_CAM and one AHB GDMA TX channel. Two static descriptors
-  reference two alternating 248-byte internal DMA rows; the CPU converts the
+  reference two alternating internal DMA rows (248 bytes, or 256 for
+  FastEPD; allocated at the larger size); the CPU converts the
   next row while the previous one transmits.
-- Pixel clock PLL160M / 4 / 2 = 20 MHz. Each row primes the LCD FIFO for 4 us
+- Pixel clock PLL160M / 4 / 2 = 20 MHz (40 MHz for FastEPD). Each row primes the LCD FIFO for 4 us
   before starting the clock; SPH, LE, CKV and SPV are plain GPIOs.
 - Every row's completion is checked before its buffer is reused. A transfer
   stalled for 100 ms stops the peripheral, powers the rails down and disables
@@ -75,10 +76,24 @@ for comparison. Four tones use levels 0, 5, 10 and 15 of those tables.
   for 29 scans in total.
 - Each scan is followed by a 250 us pause.
 
+### FastEPD (experimental)
+
+`experimental/fast/` adapts FastEPD's PaperS3 four-tone plans (Apache-2.0;
+see its LICENSE.txt and README.md). Selecting it also switches the transport
+to FastEPD's timing: 40 MHz pixel clock, 16 padding bytes, FastEPD's row-start
+gate sequence and a 230 us pause after each scan.
+
+- Differential refreshes run five primary scans, one correction scan and one
+  neutral scan; unchanged pixels stay neutral.
+- Forced refreshes run FastEPD's 26-scan full plan, which darkens and whitens
+  every pixel before writing the target from white.
+- It is not optically calibrated on this transport; validate contrast and
+  ghosting on the panel before relying on it.
+
 ### Selecting a waveform
 
 `FREEINK_PAPERS3_WAVEFORM` sets the boot waveform: `0` native (default), `1`
-LovyanGFX. `PaperS3Driver::setWaveform()` switches at runtime; call it between
+LovyanGFX, `2` FastEPD. `PaperS3Driver::setWaveform()` switches at runtime; call it between
 presentations under the render lock. The previous optical state does not carry
 over, so the next refresh is a forced one. Unknown values select native.
 
@@ -102,9 +117,11 @@ waveform, so leave it off otherwise.
 `libs/display/FreeInkDisplay/test/host/run_papers3.py` runs the driver against a
 delayed, recording DMA mock with ASan/UBSan: all 65,536 packed old/new
 combinations, DMA buffer ownership, staging, unchanged-frame skipping, the
-native forced-clear sequence, waveform switching without reallocation, and
+native forced-clear sequence, waveform switching (including the FastEPD
+clock, row length and step counts) without reallocation, and
 allocation, bus, timeout and submission failures. It also exhausts the native
-waveform's transitions, charge balance and packed rows. It does not model
+waveform's transitions, charge balance and packed rows, and FastEPD's source
+tables and packed rows in both modes. It does not model
 pigment response or measure contrast.
 
 ## Validation

@@ -16,6 +16,7 @@ with tempfile.TemporaryDirectory(prefix='papers3-driver-') as directory:
         path.write_text(text)
     for name in ('PaperS3Driver.cpp', 'PaperS3Driver.h', 'PaperS3LovyanWaveforms.h', 'PaperS3NativeWaveform.h', 'PanelDriver.h'):
         write('driver/' + name, (SOURCE / 'driver' / name).read_text().replace('../../include/GrayscaleCapabilities.h', '../GrayscaleCapabilities.h'))
+    shutil.copytree(SOURCE / 'driver/experimental/fast', root / 'driver/experimental/fast')
     shutil.copy2(SOURCE.parent / 'include/GrayscaleCapabilities.h', root)
     pins = SOURCE.parents[2] / 'hardware/BoardPaperS3/include/BoardPaperS3Pins.h'
     shutil.copy2(pins, root)
@@ -115,7 +116,7 @@ inline void lcd_ll_reset(Lcd*) {}
 inline void lcd_ll_enable_clock(Lcd*,bool) {}
 inline void lcd_ll_select_clk_src(Lcd*,int source) {assert(source==LCD_CLK_SRC_PLL160M);}
 inline void lcd_ll_set_group_clock_coeff(Lcd*,int n,int a,int b) {assert(n==4 && !a && !b);}
-inline void lcd_ll_set_pixel_clock_prescale(Lcd*,int n) {assert(n==2);prescale=n;}
+inline void lcd_ll_set_pixel_clock_prescale(Lcd*,int n) {assert(n==1 || n==2);prescale=n;}
 inline void lcd_ll_set_clock_idle_level(Lcd*,bool) {}
 inline void lcd_ll_set_pixel_clock_edge(Lcd*,bool) {}
 inline void lcd_ll_enable_rgb_mode(Lcd*,bool) {}
@@ -126,7 +127,7 @@ inline void lcd_ll_reverse_dma_data_bit_order(Lcd*,bool) {}
 inline void lcd_ll_reverse_wire_bit_order(Lcd*,bool) {}
 inline void lcd_ll_swap_dma_data_byte_order(Lcd*,bool) {}
 inline void lcd_ll_enable_output_always_on(Lcd*,bool value) {assert(!value);}
-inline void lcd_ll_set_phase_cycles(Lcd*,int c,int d,int n) {assert(!c && !d && n==248);rowBytes=n;}
+inline void lcd_ll_set_phase_cycles(Lcd*,int c,int d,int n) {assert(!c && !d && (n==248 || n==256));rowBytes=n;}
 inline void lcd_ll_set_blank_cycles(Lcd*,int,int) {}
 inline void lcd_ll_fifo_reset(Lcd*) {assert(!LCD_CAM.lcd_user.lcd_start.active);}
 inline void lcd_ll_start(Lcd*) {assert(inFlight);LCD_CAM.lcd_user.lcd_start=true;}
@@ -236,11 +237,12 @@ int main() {
   // switch is a full clear, then the waveform's differential plan is used.
   const auto* memory=state.memory;
   const auto allocated=allocations;
-  for(auto waveform : {PaperS3Waveform::Native,PaperS3Waveform::LovyanGfx,PaperS3Waveform::Native}) {
+  for(auto waveform : {PaperS3Waveform::Native,PaperS3Waveform::FastEpd,PaperS3Waveform::LovyanGfx,PaperS3Waveform::Native}) {
     driver.setWaveform(waveform);
     assert(!state.baseline && !state.pending);
     assert(state.memory==memory && allocations==allocated);
-    assert(prescale==2 && rowBytes==248);
+    const bool fast=waveform==PaperS3Waveform::FastEpd;
+    assert(prescale==(fast?1:2) && rowBytes==(fast?256:248));
     const auto before=submissions;
     const auto pausesBefore=nativePauses;
     firstRows.clear();
@@ -256,6 +258,7 @@ int main() {
         for(auto byte:firstRows[i])assert(byte==code);
       }
     }
+    if(fast)assert(submissions-before==papers3::fast::FULL_STEPS*540);
     driver.setWaveform(waveform);
     assert(state.baseline); // unchanged setting never forces repeated clears
     const auto after=submissions;
@@ -263,7 +266,7 @@ int main() {
     assert(submissions==after);
     bw[0]^=0xff;
     driver.display(bus,bw.data(),nullptr,RefreshMode::Fast,true);
-    const size_t steps=waveform==PaperS3Waveform::Native?native::STEPS:10;
+    const size_t steps=waveform==PaperS3Waveform::Native?native::STEPS:fast?papers3::fast::DIFFERENTIAL_STEPS:10;
     assert(submissions-after==steps*540);
   }
   driver.setWaveform(static_cast<PaperS3Waveform>(255));
@@ -291,3 +294,7 @@ with tempfile.TemporaryDirectory(prefix='papers3-waveform-') as directory:
                     '-fsanitize=address,undefined', '-I' + str(SOURCE), str(HERE / 'test_papers3_native_waveform.cpp'),
                     '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)
+    fast = Path(directory) / 'fastepd'
+    subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                    '-fsanitize=address,undefined', str(HERE / 'fast/test.cpp'), '-o', str(fast)], check=True)
+    subprocess.run([str(fast)], check=True)

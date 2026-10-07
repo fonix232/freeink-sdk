@@ -23,12 +23,14 @@
 #include "PaperS3Driver.h"
 #include "PaperS3LovyanWaveforms.h"
 #include "PaperS3NativeWaveform.h"
+#include "experimental/fast/PaperS3FastWaveform.h"
 
-// Boot-time waveform: 0 native, 1 LovyanGFX reference. setWaveform() overrides it.
+// Boot-time waveform: 0 native, 1 LovyanGFX reference, 2 FastEPD
+// (experimental). setWaveform() overrides it.
 #ifndef FREEINK_PAPERS3_WAVEFORM
 #define FREEINK_PAPERS3_WAVEFORM 0
 #endif
-static_assert(FREEINK_PAPERS3_WAVEFORM == 0 || FREEINK_PAPERS3_WAVEFORM == 1, "Invalid PaperS3 waveform");
+static_assert(FREEINK_PAPERS3_WAVEFORM >= 0 && FREEINK_PAPERS3_WAVEFORM <= 2, "Invalid PaperS3 waveform");
 
 // Enable only while diagnosing scan stages; per-row timers perturb the waveform.
 #ifndef FREEINK_PAPERS3_PROFILE_SCANS
@@ -39,8 +41,10 @@ namespace freeink {
 namespace {
 constexpr size_t WIDTH = 960, HEIGHT = 540, ROW_BYTES = WIDTH / 4;
 constexpr size_t FRAME_BYTES = ROW_BYTES * HEIGHT, PLANE_BYTES = WIDTH * HEIGHT / 8;
-// Each row is followed by eight padding bytes, as in the vendor driver.
-constexpr size_t DMA_BYTES = ROW_BYTES + 8;
+// Each row is followed by eight padding bytes, as in the vendor driver, or 16
+// for FastEPD. Buffers are sized for the larger so switching never reallocates.
+constexpr size_t PADDING_BYTES = 8, FASTEPD_PADDING_BYTES = 16;
+constexpr size_t DMA_BYTES = ROW_BYTES + FASTEPD_PADDING_BYTES;
 // Pause after each scan: the native trains are calibrated to EPD_Painter's
 // 4 ms post-scan wait, the LovyanGFX tables to 250 us.
 constexpr uint32_t LOVYAN_SCAN_GAP_US = 250;
@@ -64,6 +68,7 @@ struct State {
   bool ready = false, powered = false, baseline = false, pending = false, turnOff = false;
   RefreshMode mode = RefreshMode::Full;
   PaperS3ScanTiming timing;
+  bool fastFull = false;  // FastEPD: forced refresh uses its full plan
 } state;
 
 void pin(int pin, bool high) { gpio_set_level(static_cast<gpio_num_t>(pin), high); }
@@ -103,7 +108,44 @@ void release() {
   state = {};
 }
 
+bool fastEpd() { return selectedWaveform == PaperS3Waveform::FastEpd; }
+
+// FastEPD clocks at 40 MHz with 16 padding bytes; the others at 20 MHz with 8.
+void configureTransport() {
+  const size_t bytes = ROW_BYTES + (fastEpd() ? FASTEPD_PADDING_BYTES : PADDING_BYTES);
+  lcd_ll_set_pixel_clock_prescale(&LCD_CAM, fastEpd() ? 1 : 2);
+  lcd_ll_set_phase_cycles(&LCD_CAM, 0, 0, bytes);
+  for (auto& descriptor : state.descriptors) {
+    descriptor.dw0.size = bytes;
+    descriptor.dw0.length = bytes;
+  }
+}
+
+// FastEPD's PaperS3 row-start sequence (PaperS3RowControl).
+void startFastEpdFrame() {
+  pin(PAPERS3_EP_CKV, true);
+  delayMicroseconds(7);
+  pin(PAPERS3_EP_SPV, false);
+  delayMicroseconds(10);
+  pin(PAPERS3_EP_CKV, false);
+  pin(PAPERS3_EP_CKV, true);
+  delayMicroseconds(8);
+  pin(PAPERS3_EP_SPV, true);
+  delayMicroseconds(10);
+  for (unsigned i = 0; i < 2; ++i) {
+    pin(PAPERS3_EP_CKV, false);
+    pin(PAPERS3_EP_CKV, true);
+    delayMicroseconds(18);
+  }
+  pin(PAPERS3_EP_CKV, false);
+  pin(PAPERS3_EP_CKV, true);
+}
+
 void startFrame() {
+  if (fastEpd()) {
+    startFastEpdFrame();
+    return;
+  }
   pin(PAPERS3_EP_SPV, false);
   delayMicroseconds(1);
   pin(PAPERS3_EP_CKV, false);
@@ -164,8 +206,26 @@ void convertTransitions(uint8_t* __restrict output, const uint16_t* __restrict i
 }
 
 uint8_t transitionDrive(uint8_t before, uint8_t after, size_t step) {
-  return selectedWaveform == PaperS3Waveform::Native ? papers3::native::drive(before, after, step)
-                                                     : papers3::lovyan::differentialDrive(before, after, step);
+  switch (selectedWaveform) {
+    case PaperS3Waveform::LovyanGfx:
+      return papers3::lovyan::differentialDrive(before, after, step);
+    case PaperS3Waveform::FastEpd:
+      return papers3::fast::drive(before, after, step,
+                                  state.fastFull ? papers3::fast::Mode::Full : papers3::fast::Mode::Differential);
+    default:
+      return papers3::native::drive(before, after, step);
+  }
+}
+
+uint32_t scanGapUs() {
+  switch (selectedWaveform) {
+    case PaperS3Waveform::LovyanGfx:
+      return LOVYAN_SCAN_GAP_US;
+    case PaperS3Waveform::FastEpd:
+      return papers3::fast::INTER_SCAN_PAUSE_US;
+    default:
+      return papers3::native::POST_SCAN_GAP_US;
+  }
 }
 
 // One full panel scan. fillRow writes the drive codes for a row into its DMA
@@ -201,8 +261,7 @@ bool scan(FillRow fillRow) {
     ++state.timing.rows;
   }
   if (!waitLine()) return false;
-  delayMicroseconds(selectedWaveform == PaperS3Waveform::Native ? papers3::native::POST_SCAN_GAP_US
-                                                                : LOVYAN_SCAN_GAP_US);
+  delayMicroseconds(scanGapUs());
   pin(PAPERS3_EP_LE, false);
   pin(PAPERS3_EP_CKV, true);
   return true;
@@ -271,6 +330,16 @@ bool commitNative(bool force) {
   return ok;
 }
 
+// FastEPD's full plan drives every pixel from unknown to a white baseline
+// itself; its differential plan needs a valid previous frame.
+bool commitFastEpd(bool force) {
+  state.fastFull = force;
+  const auto mode = force ? papers3::fast::Mode::Full : papers3::fast::Mode::Differential;
+  bool ok = true;
+  for (size_t step = 0; step < papers3::fast::stepCount(mode) && ok; ++step) ok = transitionScan(step);
+  return ok;
+}
+
 bool commitLovyan(bool grayscale, bool force) {
   using namespace papers3::lovyan;
   if (grayscale && !force) {
@@ -296,14 +365,14 @@ void commit(bool grayscale, bool turnOff) {
   state.timing = {};
   state.timing.cpuMhz = getCpuFrequencyMhz();
   const bool native = selectedWaveform == PaperS3Waveform::Native;
-  if (native || (grayscale && !force)) {
+  if (selectedWaveform != PaperS3Waveform::LovyanGfx || (grayscale && !force)) {
     prepareTransitions(native && force);
 #if FREEINK_PAPERS3_PROFILE_SCANS
     state.timing.convertUs = esp_timer_get_time() - started;
 #endif
   }
   power(true);
-  const bool ok = native ? commitNative(force) : commitLovyan(grayscale, force);
+  const bool ok = native ? commitNative(force) : fastEpd() ? commitFastEpd(force) : commitLovyan(grayscale, force);
   if (ok) {
     memcpy(state.previous, state.target, FRAME_BYTES);
     state.baseline = true;
@@ -329,7 +398,9 @@ void loadBw(const uint8_t* fb) {
 }  // namespace
 
 void PaperS3Driver::setWaveform(PaperS3Waveform waveform) {
-  if (waveform != PaperS3Waveform::LovyanGfx) waveform = PaperS3Waveform::Native;
+  if (waveform != PaperS3Waveform::LovyanGfx && waveform != PaperS3Waveform::FastEpd) {
+    waveform = PaperS3Waveform::Native;
+  }
   if (selectedWaveform == waveform) return;
   // Caller serializes with presentation; all row transfers are synchronous.
   // The other waveform cannot start from this one's optical state.
@@ -337,6 +408,7 @@ void PaperS3Driver::setWaveform(PaperS3Waveform waveform) {
   selectedWaveform = waveform;
   state.baseline = false;
   state.pending = false;
+  if (state.ready) configureTransport();
   ESP_LOGI(TAG, "waveform=%u", static_cast<unsigned>(waveform));
 }
 
@@ -397,8 +469,6 @@ void PaperS3Driver::begin(EpdBus&) {
   lcd_ll_swap_dma_data_byte_order(&LCD_CAM, false);
   lcd_ll_enable_output_always_on(&LCD_CAM, false);
   lcd_ll_set_blank_cycles(&LCD_CAM, 1, 1);
-  lcd_ll_set_pixel_clock_prescale(&LCD_CAM, 2);
-  lcd_ll_set_phase_cycles(&LCD_CAM, 0, 0, DMA_BYTES);
   for (unsigned i = 0; i < 8; ++i) esp_rom_gpio_connect_out_signal(pins[i], LCD_DATA_OUT0_IDX + i, false, false);
   esp_rom_gpio_connect_out_signal(PAPERS3_EP_CL, LCD_PCLK_IDX, false, false);
   pin(PAPERS3_EP_SPH, true);
@@ -427,6 +497,7 @@ void PaperS3Driver::begin(EpdBus&) {
     descriptor.dw0.suc_eof = 1;
     descriptor.buffer = state.row + i * DMA_BYTES;
   }
+  configureTransport();
   state.ready = true;
 }
 
