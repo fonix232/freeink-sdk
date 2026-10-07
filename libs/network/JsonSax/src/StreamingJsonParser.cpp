@@ -2,9 +2,12 @@
 
 #include <cstring>
 
-StreamingJsonParser::StreamingJsonParser(const JsonCallbacks& callbacks) : cb(callbacks) { reset(); }
+JsonSaxParser::JsonSaxParser(const JsonCallbacks& callbacks, char* tokenBuffer, size_t capacity)
+    : cb(callbacks), tokenBuf(tokenBuffer), tokenCapacity(capacity) {
+  reset();
+}
 
-void StreamingJsonParser::reset() {
+void JsonSaxParser::reset() {
   tokenLen = 0;
   state = State::SCANNING;
   expectingValue = false;
@@ -19,7 +22,11 @@ void StreamingJsonParser::reset() {
   pendingHighSurrogate = 0;
 }
 
-void StreamingJsonParser::feed(const char* data, size_t len) {
+void JsonSaxParser::feed(const char* data, size_t len) {
+  if (!tokenBuf || tokenCapacity < 2) {
+    error = true;
+    return;
+  }
   for (size_t i = 0; i < len && !error; ++i) {
     char c = data[i];
     switch (state) {
@@ -43,7 +50,7 @@ void StreamingJsonParser::feed(const char* data, size_t len) {
   }
 }
 
-void StreamingJsonParser::handleScanning(char c) {
+void JsonSaxParser::handleScanning(char c) {
   switch (c) {
     case '"':
       tokenLen = 0;
@@ -125,7 +132,7 @@ void StreamingJsonParser::handleScanning(char c) {
   }
 }
 
-void StreamingJsonParser::handleStringChar(char c) {
+void JsonSaxParser::handleStringChar(char c) {
   if (unicodeDigitsLeft > 0) {
     int digit;
     if (c >= '0' && c <= '9') {
@@ -199,7 +206,7 @@ void StreamingJsonParser::handleStringChar(char c) {
   appendToken(c);
 }
 
-void StreamingJsonParser::finishUnicodeEscape() {
+void JsonSaxParser::finishUnicodeEscape() {
   uint32_t codepoint = unicodeValue;
   if (pendingHighSurrogate != 0) {
     if (codepoint >= 0xDC00 && codepoint <= 0xDFFF) {
@@ -221,14 +228,14 @@ void StreamingJsonParser::finishUnicodeEscape() {
   appendUtf8(codepoint);
 }
 
-void StreamingJsonParser::flushPendingSurrogate() {
+void JsonSaxParser::flushPendingSurrogate() {
   if (pendingHighSurrogate != 0) {
     pendingHighSurrogate = 0;
     appendUtf8(0xFFFD);
   }
 }
 
-void StreamingJsonParser::appendUtf8(uint32_t codepoint) {
+void JsonSaxParser::appendUtf8(uint32_t codepoint) {
   if (codepoint < 0x80) {
     appendToken(static_cast<char>(codepoint));
   } else if (codepoint < 0x800) {
@@ -246,13 +253,15 @@ void StreamingJsonParser::appendUtf8(uint32_t codepoint) {
   }
 }
 
-void StreamingJsonParser::handleNumber(char c) {
+void JsonSaxParser::handleNumber(char c) {
   if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E') {
     appendToken(c);
     return;
   }
 
-  if (!tokenOverflow && cb.onNumber) {
+  if (tokenOverflow) {
+    if (cb.onOverflow) cb.onOverflow(cb.ctx);
+  } else if (cb.onNumber) {
     tokenBuf[tokenLen] = '\0';
     cb.onNumber(cb.ctx, tokenBuf, tokenLen);
   }
@@ -262,7 +271,7 @@ void StreamingJsonParser::handleNumber(char c) {
   handleScanning(c);
 }
 
-void StreamingJsonParser::handleLiteral(char c) {
+void JsonSaxParser::handleLiteral(char c) {
   if (c == literalExpected[literalPos]) {
     ++literalPos;
     if (literalPos == literalLen) {
@@ -281,7 +290,7 @@ void StreamingJsonParser::handleLiteral(char c) {
   }
 }
 
-void StreamingJsonParser::handleSkipString(char c) {
+void JsonSaxParser::handleSkipString(char c) {
   if (escaped) {
     escaped = false;
     return;
@@ -296,16 +305,17 @@ void StreamingJsonParser::handleSkipString(char c) {
   }
 }
 
-void StreamingJsonParser::appendToken(char c) {
-  if (tokenLen < TOKEN_BUF_SIZE - 1) {
+void JsonSaxParser::appendToken(char c) {
+  if (tokenLen + 1 < tokenCapacity) {
     tokenBuf[tokenLen++] = c;
   } else {
     tokenOverflow = true;
   }
 }
 
-void StreamingJsonParser::emitToken() {
+void JsonSaxParser::emitToken() {
   flushPendingSurrogate();
+  if (tokenOverflow && cb.onOverflow) cb.onOverflow(cb.ctx);
   if (state == State::IN_STRING_KEY) {
     if (!tokenOverflow && cb.onKey) {
       tokenBuf[tokenLen] = '\0';

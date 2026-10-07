@@ -1,6 +1,6 @@
 {
   "name": "JsonSax",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "FreeInk streaming JSON SAX parser (StreamingJsonParser): decodes UTF-8/\\uXXXX, bounded token buffer, no DOM.",
   "keywords": "json, sax, parser, streaming",
   "authors": [{"name": "FreeInk SDK Contributors"}],
