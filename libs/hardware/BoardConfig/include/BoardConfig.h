@@ -171,10 +171,10 @@
 #else
 #define FREEINK_DRIVER_UC8253_MURPHY 0
 #endif
-// LilyGo T5 S3 and M5Stack PaperS3: raw-parallel ED047TC1 via LovyanGFX (M5GFX).
-// External-bus driver; each board injects its own bus pins/power in an
-// LgfxEpdConfig (PaperS3's rails are plain GPIOs, LilyGo's ride a PMIC+expander).
-#if FREEINK_DEVICE_LILYGO || FREEINK_DEVICE_PAPERS3
+// PaperS3 owns its native LCD_CAM/GDMA waveform driver. LilyGo retains
+// its board-specific LovyanGFX adapter and PMIC power hooks.
+#define FREEINK_DRIVER_PAPERS3 FREEINK_DEVICE_PAPERS3
+#if FREEINK_DEVICE_LILYGO
 #define FREEINK_DRIVER_LGFX_EPD 1
 #else
 #define FREEINK_DRIVER_LGFX_EPD 0
@@ -407,7 +407,7 @@ enum class Board : uint8_t {
   M5PaperV11,
   Sticky,
   PaperMono,
-  M5PaperS3,  // ESP32-S3 sibling of M5Paper v1.1: same ED047TC1 glass, no IT8951 — raw parallel via LovyanGFX
+  M5PaperS3,  // ESP32-S3 sibling of M5Paper v1.1: same ED047TC1 glass, no IT8951 — raw parallel ED047TC1
   EegoA4,     // EEGO Reader A4: ESP32-S3, UC8279C 768x552 SPI panel, GSLX680 touch, PCF8563 RTC
   OnePage,    // OnePage: ESP32-C61, SSD1677 800x480 SPI panel, 4-key ADC ladder + 3 side keys
   WsEpaper397,  // Waveshare ESP32-S3-ePaper-3.97: SSD1677 800x480, 3 keys + BOOT, AXP2101 PMIC
@@ -445,6 +445,7 @@ enum class DisplayController : uint8_t {
   IT8951 = 5,
   UC8279 = 6,
   UC8179 = 7,
+  PaperS3 = 9,  // ED047TC1 driven directly by LCD_CAM/GDMA
   UC8279C = 8  // EEGO A4 768x552 sibling of the UC8279 family (Uc8279cA4Driver)
 };
 
@@ -1337,12 +1338,9 @@ constexpr BoardProfile M5PAPER_V11 = {
 // --- M5Stack PaperS3 4.7" (ED047TC1 raw-parallel EPD) — ESP32-S3 ---------------
 // The S3 successor to M5Paper v1.1: the same 960x540 16-gray ED047TC1 glass, but
 // with NO IT8951 — the S3 drives the panel directly over the 8-bit parallel bus,
-// exactly the LilyGo T5 S3 display class, so it shares FREEINK_DRIVER_LGFX_EPD
-// (LovyanGFX Panel_EPD/Bus_EPD via m5stack/M5GFX). Unlike the LilyGo there is no
-// PMIC/expander: the EPD rails are plain GPIOs (OE=45, PWR=46) that Bus_EPD's
-// stock power sequence drives itself, so the board's LgfxEpdConfig
-// (m5PaperS3LgfxConfig, libs/hardware/BoardPaperS3) carries real pins and no
-// power hooks. Pin map cross-checked M5GFX autodetect (board_M5PaperS3) +
+// using the native LCD_CAM/GDMA driver. EPD rails are plain GPIOs (OE=45,
+// PWR=46), sequenced directly by the driver.
+// Pin map cross-checked M5GFX autodetect (board_M5PaperS3) +
 // M5Unified + the official docs; where the docs pinmap disagrees (it labels G45
 // "PWR" and omits G16/G46), M5GFX — the working vendor driver — wins.
 //
@@ -1354,7 +1352,7 @@ constexpr BoardProfile M5PAPER_V11 = {
 //
 // Pending hardware validation: panel rotation (M5GFX defaults the device to
 // portrait via offset_rotation=3; this profile keeps the SDK's native-landscape
-// convention with rotation 0 in the LgfxEpdConfig), touch flipX/flipY +
+// convention), touch flipX/flipY +
 // gt911CoordsAtByte0 (no RST wired -> self-configured, like M5Paper v1.1), and
 // the battery divider. IMU is a BMI270 at 0x68 on the internal bus — not a
 // supported ImuType yet, so it is left out of sensors.
@@ -1362,11 +1360,11 @@ constexpr BoardProfile M5PAPER_S3 = {
     Board::M5PaperS3,
     "m5paper_s3",
     InputStyle::DigitalButtons,  // vacuous: no GPIO buttons exist (see note above)
-    DisplayController::LgfxEpd,
+    DisplayController::PaperS3,
     960,
     540,
     {PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED,
-     PIN_UNASSIGNED},                            // no SPI display pins: parallel bus lives in LgfxEpdConfig
+     PIN_UNASSIGNED},                            // no SPI display pins: parallel bus pins live in BoardPaperS3Pins.h
     0,                                           // displaySpiHz n/a (external bus)
     {39, 40, 38, 47, PIN_UNASSIGNED, false, 0},  // SD over SPI: SCLK39 MISO40 MOSI38 CS47, no power gate
     {PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED,
@@ -1374,7 +1372,7 @@ constexpr BoardProfile M5PAPER_S3 = {
     3,     // batteryAdc GPIO3 (ADC1_CH2)
     4,     // batteryChargeStatus GPIO4, LOW = charging (LGS4056H STAT)
     2.0f,  // divider 2:1 (M5Unified's _adc_ratio; pending hardware validation)
-    5,     // usbDetect GPIO5, HIGH = USB present
+    5,     // USB_DET is analog: >200 mV means USB present
     // GT911 on the internal I2C bus SDA41/SCL42 (shared with the BM8563 RTC +
     // BMI270 IMU), INT=GPIO48, no reset wired (self-loads its config), 0x5D alt
     // 0x14. Portrait digitizer (540x960) on the landscape panel -> swapXY, rawMax
@@ -2067,6 +2065,12 @@ inline bool isMetalioEInk4() { return ACTIVE.board == Board::MetalioEInk4; }
 inline bool isOnePage() { return ACTIVE.board == Board::OnePage; }
 inline bool isWsEpaper397() { return ACTIVE.board == Board::WsEpaper397; }
 inline bool hasTouch() { return ACTIVE.touch.controller != TouchController::None; }
+inline bool requiresTouchNavigation() {
+  const auto& input = ACTIVE.input;
+  return hasTouch() && input.back == PIN_UNASSIGNED && input.confirm == PIN_UNASSIGNED &&
+         input.left == PIN_UNASSIGNED && input.right == PIN_UNASSIGNED && input.up == PIN_UNASSIGNED &&
+         input.down == PIN_UNASSIGNED && input.adcLadderPin == PIN_UNASSIGNED;
+}
 inline bool hasHomeKey() { return ACTIVE.touch.hasHomeKey; }
 inline bool hasPwmFrontlight() { return ACTIVE.frontlight.gpio != PIN_UNASSIGNED || ACTIVE.frontlight.viaPm1Pwm; }
 inline bool hasI2cFrontlight() { return ACTIVE.i2cFrontlight.controller != I2cFrontlightController::None; }

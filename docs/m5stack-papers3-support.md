@@ -12,9 +12,10 @@ omits GPIO16/GPIO46), M5GFX — the shipping vendor driver — is authoritative.
 
 ## Display
 
-`LgfxEpdDriver` (LovyanGFX `Panel_EPD`/`Bus_EPD`, bundled in `m5stack/M5GFX`)
-compiles under `FREEINK_DRIVER_LGFX_EPD`, derived from `FREEINK_DEVICE_PAPERS3`
-just as it is from `FREEINK_DEVICE_LILYGO`. The parallel bus:
+`PaperS3Driver` (`FREEINK_DRIVER_PAPERS3`, derived from `FREEINK_DEVICE_PAPERS3`)
+drives the panel natively through the S3's LCD_CAM peripheral and a GDMA TX
+channel; no LovyanGFX/M5GFX code is linked. See `papers3-native.md` for the
+transport and waveforms. The parallel bus:
 
 | Signal | GPIO | | Signal | GPIO |
 |---|---|---|---|---|
@@ -28,20 +29,13 @@ just as it is from `FREEINK_DEVICE_LILYGO`. The parallel bus:
 | D7 | 10 | | | |
 
 Unlike the LilyGo (TPS65185 PMIC + PCA9535 expander), the PaperS3's EPD power is
-just the OE/PWR/SPV GPIOs, sequenced by `Bus_EPD`'s **stock** `powerControl`
-(on: OE → PWR → SPV with settling delays; off in reverse). The board's
-`LgfxEpdConfig` (`freeink::m5PaperS3LgfxConfig()` in
-`libs/hardware/BoardPaperS3`) therefore carries real bus pins and **null power
-hooks** — `LgfxEpdDriver`'s bus wrapper delegates to the base class when a hook
-is absent. Its `prepare` hook only parks the PWROFF pulse line (GPIO44) LOW.
+just the OE/PWR/SPV GPIOs, which `PaperS3Driver` sequences itself (on: OE → PWR
+→ SPV with settling delays; off in reverse). `BoardPaperS3` parks the PWROFF
+pulse line (GPIO44) LOW.
 
-Bus speed 16 MHz, line padding 8, `rotation = 0` (the SDK's native-landscape
-convention, like the LilyGo; M5GFX ships the device portrait via
-`offset_rotation=3`). **Pending hardware validation:** if landscape "up" comes
-out inverted, set rotation 2 in the config.
-
-M5GFX hard-requires OPI PSRAM on this board, so the env sets
-`board_build.arduino.memory_type = qio_opi` and `-DBOARD_HAS_PSRAM`.
+The board has 8 MB octal PSRAM, so the env sets
+`board_build.arduino.memory_type = qio_opi` and `-DBOARD_HAS_PSRAM`; the driver
+keeps its frame images in PSRAM.
 
 ## Inputs — touch only
 
@@ -98,12 +92,7 @@ board_build.arduino.memory_type = qio_opi
 build_flags = -DBOARD_HAS_PSRAM -DFREEINK_DEVICE_PAPERS3=1
 lib_deps =
   BoardPaperS3=symlink://freeink-sdk/libs/hardware/BoardPaperS3
-  m5stack/M5GFX @ 0.2.20
 ```
-
-No `-DFREEINK_LGFX_EPD_CONFIG` is needed: `FREEINK_DEVICE_PAPERS3` selects
-`m5PaperS3LgfxConfig()` as the driver's config (an explicit
-`-DFREEINK_LGFX_EPD_CONFIG=yourCfg` still overrides it for custom boards).
 
 ## Pending hardware validation
 

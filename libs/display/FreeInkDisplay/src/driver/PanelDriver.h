@@ -40,8 +40,8 @@ class PanelDriver {
   virtual int8_t spiMiso() const { return -1; }  // SSD1677 uses none; M5 shares MISO
   virtual int8_t coCs() const { return -1; }     // co-resident SPI CS to hold high (M5 SD)
 
-  // True for drivers backed by an external library that manages its own SPI /
-  // display hardware (e.g. M5GFX, EPD_Painter). When true the facade does NOT
+  // True for drivers that own their transport (parallel panels or external
+  // libraries). When true the facade does NOT
   // bring up its EpdBus — the driver owns the panel end to end.
   virtual bool usesExternalBus() const { return false; }
 
