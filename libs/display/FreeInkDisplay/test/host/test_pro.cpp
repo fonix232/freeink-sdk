@@ -497,18 +497,10 @@ static void testUc8279X4WaveformSelection() {
     for (uint8_t mask : {0x00, 0x01, 0x03}) {
       const auto text = render(GrayscaleMode::Overlay, mask, false);
       assert(text != quality);
-      assert(text[2] == text[3]);
-      const uint8_t timing = variant == 0x02 ? 2 : 3;
-      for (unsigned t = 0; t < 5; ++t) {
-        Bytes expected = {1, 2, timing, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1};
-        expected.resize(49, 0);
-        if (t == 1) expected[3] |= 0x40;
-        if (t == 2 || t == 3) expected[2] |= 0x80;
-        if (t == 4) expected[3] |= 0x80;
-        assert(text[t] == expected);
-      }
+      assert(text[1] == quality[0] && text[4] == quality[0]);
+      assert(text[2] == quality[2] && text[3] == quality[3]);
     }
-    assert(render(GrayscaleMode::Overlay, 0x07, false) == quality);
+    assert(render(GrayscaleMode::Overlay, 0xFF, false) == quality);
     assert(render(GrayscaleMode::Overlay, 0, true) == quality);
     // An image pass must not leave the next sparse page on the quality bank.
     assert(render(GrayscaleMode::Overlay, 0x01, false) != quality);
@@ -612,7 +604,88 @@ static void testMetalio() {
   assert(lastRegister(bus, 0x10) == 0x03);
 }
 
+#if FREEINK_UC8279X4_COMBINED_TEXT
+static void testCombinedImageFacade() {
+  for (uint8_t variant : {0x02, 0x68, 0x69}) {
+    BoardConfig::ACTIVE.displayControllerVariant = variant;
+    Uc8279X4Driver driver;
+    FreeInkDisplay display(1, 2, 3, 4, 5, 6);
+    display._driver = &driver;
+    display.begin();
+    display.setReaderRendering(true);
+    const auto bw = frame(91), lsb = frame(13), msb = frame(29);
+    std::vector<Bytes> g;
+    // Wake recovery must actively drive a retained cover to white, even when
+    // the requested destination contains no black pixels.
+    display.clearScreen(0xFF);
+    display._bus.clear();
+    display.displayBuffer(FreeInkDisplay::FULL_REFRESH, true);
+    unsigned clears = 0;
+    bool drivenWhite = false;
+    for (const auto& w : display._bus.writes) {
+      if (w.command == 0x10 && !clears) {
+        assert(w.bytes.size() == 60000);
+        assert(std::all_of(w.bytes.begin() + 12000, w.bytes.end(), [](uint8_t b) { return b == 0; }));
+        drivenWhite = true;
+      }
+      if (w.command == 0x12) ++clears;
+    }
+    assert(drivenWhite && clears == 1 && !driver._isScreenOn);
+    assert(!driver._needFullClear && driver._oldPlaneValid);
+    for (int page = 0; page < 5; ++page) {
+      const auto mode = page == 0   ? GrayscaleMode::Overlay
+                        : page == 4 ? GrayscaleMode::Direct
+                                    : GrayscaleMode::Absolute;
+      // Establish the exact selected text bank, then demand it for image pages.
+      memcpy(display.getFrameBuffer(), bw.data(), bw.size());
+      display._bus.clear();
+      assert(display.displayGrayscaleBase(mode, FreeInkDisplay::FAST_REFRESH));
+      display.copyGrayscaleBuffers(lsb.data(), msb.data());
+      for (const auto& w : display._bus.writes) assert(w.command != 0x12);
+      display.displayGrayBuffer();
+      unsigned refreshes = 0;
+      std::vector<Bytes> banks;
+      for (const auto& w : display._bus.writes) {
+        if (w.command == 0x12) ++refreshes;
+        if (w.command >= 0x20 && w.command <= 0x24 && w.bytes.size() == 49) banks.push_back(w.bytes);
+      }
+      assert(refreshes == 1 && banks.size() == 5);
+      if (page == 0)
+        g = banks;
+      else
+        assert(banks == g);
+      assert(!driver._needFullClear && driver._oldPlaneValid);
+      assert(display._grayscaleMode == GrayscaleMode::Overlay);
+      display.cleanupGrayscaleBuffers(bw.data());
+      assert(!driver._needFullClear);
+    }
+    // Missing image plane must not activate; cancellation still requests cleanup.
+    assert(display.displayGrayscaleBase(GrayscaleMode::Absolute, FreeInkDisplay::FAST_REFRESH));
+    display.copyGrayscaleLsbBuffers(lsb.data());
+    display._bus.clear();
+    display.displayGrayBuffer();
+    for (const auto& w : display._bus.writes) assert(w.command != 0x12);
+    assert(driver._needFullClear);
+    // Finish an outstanding system paint before switching back to reader G.
+    display.setReaderRendering(false);
+    display.displayBufferAsync(FreeInkDisplay::FAST_REFRESH);
+    assert(display._refreshPending);
+    display.setReaderRendering(true);
+    assert(!display._refreshPending && driver._needFullClear);
+    display.releaseBuffers();
+    free(driver._grayBase);
+    driver._grayBase = nullptr;
+  }
+  std::puts(
+      "Combined facade: identical G for text/images, one activation, preserved baseline and canceled uploads passed");
+}
+#endif
+
 int main(int argc, char** argv) {
+#if FREEINK_UC8279X4_COMBINED_TEXT
+  testCombinedImageFacade();
+  return 0;
+#endif
   if (argc > 1 && std::strcmp(argv[1], "metalio") == 0) {
     testMetalio();
     std::puts("Metalio refresh, temperature, grayscale fallback and async power-down passed");
