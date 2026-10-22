@@ -230,12 +230,13 @@ FsBlockDeviceInterface* SDCardManager::detachFilesystemForRawAccess() {
   if (!initialized) return nullptr;
   auto* const card = sd.card();
   if (!card) return nullptr;
-  // FsVolume::end() ONLY — deliberately not sd.end(), which would also call
-  // SdCard::end() and tear down the card session the USB host is about to read
-  // through. The card stays initialized and selected; remounting later goes
-  // back through begin(), whose sd.begin() re-runs SdCard::begin() on the same
-  // (factory-owned, statically allocated) card object.
-  sd.FsVolume::end();
+  // Flush filesystem metadata before dropping the volume; keep the card alive.
+  {
+    auto root = vol().open("/", O_RDONLY);
+    if (!root || !root.sync()) return nullptr;
+  }
+  if (!card->syncDevice()) return nullptr;
+  vol().end();
   initialized = false;
   cachedTotalBytes = 0;
   cachedUsedBytes = 0;
